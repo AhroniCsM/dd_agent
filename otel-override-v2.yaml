@@ -1,0 +1,416 @@
+---
+global:
+  domain: eu2.coralogix.com
+  clusterName: dd-trace-aharon
+  datadogAPIKey: "bb7a1a11b7b125b3f115a10f7482dae6"
+  datadogSite: datadoghq.eu
+
+opentelemetry-agent:
+  presets:
+    loadBalancing:
+      enabled: true
+      routingKey: 'traceID'
+      hostname: coralogix-opentelemetry-gateway
+    # The use of SpanMetrics in APM will require the backend to be reconfigured using the GRPC API.
+    # This is currently only available for design-partners during the Beta
+    spanMetrics:
+      enabled: true
+      dbMetrics:
+        enabled: true
+  config:
+    receivers:
+      datadog:
+        endpoint: "${env:MY_POD_IP}:8127" # Custom Port to avoid conflict with DD Agent
+        read_timeout: 60s
+      statsd:
+        endpoint: "${env:MY_POD_IP}:8128" # Custom Port to avoid conflict with DD Agent
+        is_monotonic_counter: true
+        aggregation_interval: 10s
+        enable_metric_type: true
+        timer_histogram_mapping:
+          - statsd_type: 'timer'
+            observer_type: 'summary'
+          - statsd_type: 'distribution'
+            observer_type: 'histogram'
+            histogram:
+              max_size: 50
+          - statsd_type: 'histogram'
+            observer_type: 'histogram'
+            histogram:
+              max_size: 50
+          - statsd_type: 'timing'
+            observer_type: 'summary'
+      filelog:
+        include:
+          - /var/log/pods/*/*/*.log
+          # TODO: Modify for required Namespaces
+          #- /var/log/pods/NAMESPACE1_*/*/*.log
+          #- /var/log/pods/NAMESPACE2_*/*/*.log
+
+    processors:
+      filter/db_spanmetrics:
+        traces:
+          span:
+            - attributes["db.system"] == nil
+      transform/db:
+        error_mode: silent
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["db.namespace"], attributes["db.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["server.address"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["network.peer.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["net.peer.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["db.system"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.operation.name"], attributes["db.operation"]) where attributes["db.operation.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.sql.table"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.cassandra.table"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.mongodb.collection"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.redis.database_index"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.elasticsearch.path_parts.index"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.cosmosdb.container"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["aws_dynamodb.table_names"]) where attributes["db.collection.name"] == nil
+
+
+      transform:
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["host.name"], resource.attributes["host.name"])
+              - set(attributes["process.command"], resource.attributes["process.command"])
+              - set(attributes["process.command_line"], resource.attributes["process.command_line"])
+              - set(attributes["process.executable.name"], resource.attributes["process.executable.name"])
+              - set(attributes["process.executable.path"], resource.attributes["process.executable.path"])
+              - set(attributes["process.owner"], resource.attributes["process.owner"])
+              - set(attributes["process.parent_pid"], resource.attributes["process.parent_pid"])
+              - set(attributes["process.pid"], resource.attributes["process.pid"])
+
+      # TODO: OPTIONAL
+      # Used to convert custom metrics of type COUNTER into the correct format.
+      # Only applicable if custom DogStatsD metrics are being sent.
+      # cumulativetodelta/dd_counters:
+      #   include:
+      #     metrics:
+      #       - custom_metric_name
+      #     match_type: strict
+
+    service:
+      pipelines:
+        traces/db:
+          exporters:
+            - spanmetrics/db
+          processors:
+            - filter/db_spanmetrics
+            - transform/db
+            - batch
+          receivers:
+            - forward/db
+        traces:
+          receivers:
+            - datadog
+            - otlp
+            - zipkin
+            - jaeger
+          exporters:
+            - loadbalancing
+
+  ports:
+    datadog:
+      enabled: true
+      containerPort: 8127
+      servicePort: 8127
+      hostPort: 8127
+      protocol: TCP
+    statsd:
+      enabled: true
+      containerPort: 8128
+      servicePort: 8128
+      hostPort: 8128
+      protocol: UDP
+
+opentelemetry-gateway:
+  enabled: true
+  # Use these to scale-up or scale-out the gateway collectors.
+  replicaCount: 1
+  # resources:
+  #   requests:
+  #     cpu: 500m
+  #     memory: 256Mi
+  #   limits:
+  #     cpu: 2
+  #     memory: 2G
+
+  config:
+    exporters:
+      datadog:
+        api:
+          key: "{{ .Values.global.datadogAPIKey }}"
+          site: "{{ .Values.global.datadogSite }}" # Confirm that this is correct
+        hostname: ${env:KUBE_NODE_NAME}
+    connectors:
+      forward:
+      forward/coralogix:
+      spanmetrics:
+        histogram:
+          explicit:
+            buckets: [100us, 1ms, 2ms, 4ms, 6ms, 10ms, 100ms, 250ms]
+        dimensions:
+          - name: cgx.transaction
+            default: cx_null
+          - name: cgx.transaction.root
+            default: cx_null
+          - name: error
+            default: cx_null
+          - name: http.method
+            default: cx_null
+          - name: http.status_code
+            default: cx_null
+          - name: service.version
+            default: cx_null
+          - name: operation.category
+            default: cx_null
+        exemplars:
+          enabled: false
+        dimensions_cache_size: 1000
+        aggregation_temporality: 'AGGREGATION_TEMPORALITY_CUMULATIVE'
+        metrics_flush_interval: 15s
+        events:
+          enabled: true
+          dimensions:
+            - name: exception.type
+            - name: exception.message
+      datadog/connector:
+        traces:
+          span_name_remappings:
+            io.opentelemetry.javaagent.spring.client: spring.client
+            instrumentation:express.server: express
+            go.opentelemetry.io_contrib_instrumentation_net_http_otelhttp.client: http.client
+          span_name_as_resource_name: true
+          compute_top_level_by_span_kind: true
+          trace_buffer: 1000
+    processors:
+      transform/ddtrace_coralogix:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(resource.attributes["service.name"], attributes["service.name"])
+          - context: span
+            conditions:
+              - kind == 2
+            statements:
+              - set(name, attributes["dd.span.Resource"])
+          - context: span
+            conditions:
+              - attributes["db.type"] != nil or attributes["db.system"] != nil
+            statements:
+              - set(attributes["db.system"], attributes["db.type"])
+              - replace_match(attributes["db.system"], "postgres", "postgresql")
+              - replace_match(attributes["db.system"], "sql-server", "mssql")
+              - set(attributes["db.statement"], attributes["dd.span.Resource"])
+              - set(attributes["db.statement"], attributes["mongodb.query"])
+              - set(attributes["db.statement"], attributes["redis.raw_command"])
+              - set(attributes["otel.status_description"], attributes["error.message"])
+
+      transform/coralogix_clean:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - delete_key(attributes,"_dd.p.tid")
+              - delete_key(attributes,"language")
+              - delete_key(attributes,"dd.span.Resource")
+              - delete_key(attributes,"_dd.p.dm")
+              - delete_key(resource.attributes,"telemetry.sdk.version")
+              - delete_key(resource.attributes,"telemetry.sdk.name")
+
+      transform/ddtrace_datadog_span_metrics:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            conditions:
+              - resource.attributes["telemetry.sdk.language"] == "go" and kind == 2
+            statements:
+              - set(resource.attributes["resource.name"], attributes["dd.span.Resource"])
+          - context: span
+            conditions:
+              - attributes["language"] == "go" and kind == nil and attributes["component"] == nil and attributes["http.method"] != nil
+            statements:
+              - set(resource.attributes["resource.name"], attributes["dd.span.Resource"])
+          # OPTIONAL
+          # - context: span
+          #   conditions:
+          #   - attributes["env"] == nil
+          #   statements:
+          #   - set(attributes["env"], "staging")
+
+      transform/ddtrace_datadog:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            conditions:
+              - (kind == 2 or kind == 3) and resource.attributes["telemetry.sdk.language"] == "go" and attributes["http.route"] == nil and attributes["http.url"] != nil
+            statements:
+              - set(attributes["http.route"], attributes["http.url"])
+              - replace_pattern(attributes["http.route"], "^https?://[^/]+(/.*)?", "$$1")
+          - context: span
+            conditions:
+              - attributes["language"] == "go" and kind == nil and attributes["component"] == nil and attributes["http.method"] != nil
+            statements:
+              - set(attributes["http.route"], attributes["http.url"])
+              - replace_pattern(attributes["http.route"], "^https?://[^/]+(/.*)?", "$$1")
+          # OPTIONAL
+          # - context: span
+          #   conditions:
+          #   - attributes["env"] == nil
+          #   statements:
+          #   - set(attributes["env"], "staging")
+      tail_sampling:
+        # TODO: If the sampling does not appear to be working, read the documentation on these values and adjust accordingly
+        # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/tailsamplingprocessor#tail-sampling-processor
+        # decision_wait: 30
+        # num_traces: 50000
+        # expected_new_traces_per_sec: 0
+        # decision_cache:
+        #   sampled_cache_size: 100000
+
+        # Update configuration here, with your settings and tail sampling policies
+        # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/tailsamplingprocessor
+        policies: [
+            # This first sampling policy is an EXAMPLE of how to ship 5XX errors to Coraloigx at a higher rate of other traces.
+            # You should always include a probabilistic sampler AND a rate limiting sampler in your configurations.
+            # {
+            #   name: 500-errors-policy,
+            #   type: and,
+            #   and:
+            #     {
+            #       and_sub_policy:
+            #         [
+            #           {
+            #             name: status-500-policy,
+            #             type: ottl_condition,
+            #             ottl_condition:
+            #               {
+            #                 error_mode: ignore,
+            #                 span: ['IsMatch(attributes["http.status_code"], "5..")'],
+            #               },
+            #           },
+            #           {
+            #             name: probabilistic-500-policy,
+            #             type: probabilistic,
+            #             probabilistic: { sampling_percentage: 10.0 },
+            #           },
+            #           {
+            #             name: rate-limiting-policy,
+            #             type: rate_limiting,
+            #             rate_limiting: { spans_per_second: 400 }, # reduce to 100
+            #           },
+            #         ],
+            #     },
+            # },
+                {
+              # ERRRORS - Sampled
+              name: errored-traces-policy,
+              type: and,
+              and:
+                {
+                  and_sub_policy:
+                    [
+                      {
+                        name: status-code-policy,
+                        type: status_code,
+                        status_code: { status_codes: [ERROR] },
+                      },
+                      {
+                        name: probabilistic-low-sample-policy,
+                        type: probabilistic,
+                        probabilistic: { sampling_percentage: 100 }, # Adjust, but keep super low!
+                      },
+                      # {
+                      #   name: rate-limiting-policy,
+                      #   type: rate_limiting,
+                      #   rate_limiting: { spans_per_second: 400 },
+
+                      # },
+                    ],
+                },
+            },
+            {
+              ### THIS SHOULD BE YOUR LAST POLICY - AS A CATCHALL
+              name: all-other-traces-policy,
+              type: and,
+              and:
+                {
+                  and_sub_policy:
+                    [
+                      {
+                        name: probabilistic-low-sample-policy,
+                        type: probabilistic,
+                        probabilistic: { sampling_percentage: 100 }, # Adjust, but keep super low!
+                      },
+                      # {
+                      #   name: rate-limiting-policy,
+                      #   type: rate_limiting,
+                      #   rate_limiting: { spans_per_second: 400 }, # reduce to 100
+                      # },
+                    ],
+                },
+            },
+          ]
+    service:
+      pipelines:
+        traces/in_dd:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - transform/ddtrace_datadog
+            - transform/ddtrace_datadog_span_metrics
+            - batch
+          exporters:
+            - datadog/connector
+        traces/datadog:
+          receivers:
+            - datadog/connector
+          processors:
+            - memory_limiter
+            - tail_sampling
+            - batch
+          exporters:
+            - datadog
+        metrics/datadog_spanmetrics:
+          receivers:
+            - datadog/connector
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - datadog
+        traces:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - transform/ddtrace_coralogix
+            - transform/coralogix_clean
+            - batch
+          exporters:
+            - spanmetrics
+            - forward/coralogix
+        traces/coralogix:
+          receivers:
+            - forward/coralogix
+          processors:
+            - memory_limiter
+            - tail_sampling
+            - batch
+          exporters:
+            - coralogix
+        metrics/coralogix:
+          receivers:
+            - spanmetrics
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - coralogix

@@ -1,0 +1,31 @@
+datadog:
+  apiKey: "bb7a1a11b7b125b3f115a10f7482dae6"
+  site: datadoghq.eu
+  containers:
+    - name: trace-agent
+      ports:
+        - containerPort: 8126
+          hostPort: 8126
+          name: traceport
+          protocol: TCP
+  env:
+    - name: DD_APM_ENABLED
+      value: 'true'
+    - name: DD_APM_NON_LOCAL_TRAFFIC
+      value: 'true'
+    - name: DD_APM_RECEIVER_PORT
+      value: 8126
+    - name: NODE
+      valueFrom:
+        fieldRef:
+          fieldPath: status.hostIP
+    - name: DD_ADDITIONAL_ENDPOINTS
+      value: "{\"http://$(NODE):8127\": [\"abc12345efgh6789ijklmnopqrstuvwx\"]}"
+    - name: DD_APM_ADDITIONAL_ENDPOINTS
+      value: "{\"http://$(NODE):8127\": [\"abc12345efgh6789ijklmnopqrstuvwx\"]}"
+
+  # apm:
+  #   # the following values are default:
+  #   socketEnabled: true
+  #   hostSocketPath: /var/run/datadog/
+  #   socketPath: /var/run/datadog/apm.socket

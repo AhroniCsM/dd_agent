@@ -1,0 +1,39 @@
+#This is a python app with dd_trace - send traces to DD-agent > Datadog platform
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-app
+  labels:
+    app: python-app
+    tags.datadoghq.com/env: production # Replace <env> with your environment (e.g., "production")
+    tags.datadoghq.com/service: python-app # Replace <service> with your service name
+    tags.datadoghq.com/version: "1.0.0" # Replace <version> with your application version
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-app
+  template:
+    metadata:
+      labels:
+        app: python-app
+        tags.datadoghq.com/env: production # Replace <env> with your environment
+        tags.datadoghq.com/service: python-app # Replace <service> with your service name
+        tags.datadoghq.com/version: "1.0.0" # Replace <version> with your application version
+        admission.datadoghq.com/enabled: "true"
+      annotations:
+        admission.datadoghq.com/python-lib.version: v2.17.3
+    spec:
+      containers:
+        - name: python-app
+          image: 104013952213.dkr.ecr.eu-north-1.amazonaws.com/aharon-flask-app:python-dd-app
+          ports:
+            - containerPort: 5500
+          env:
+            - name: NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DD_TRACE_AGENT_URL
+              value: "http://$(NODE):8127"

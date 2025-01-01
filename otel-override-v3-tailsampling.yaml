@@ -1,0 +1,32 @@
+global:
+  domain: eu2.coralogix.com
+  clusterName: dd-trace-aharon-v3
+
+opentelemetry-agent:
+  config:
+    receivers:
+      datadog:
+        endpoint: 0.0.0.0:8127
+    service:
+      pipelines:
+        metrics/dd:
+          receivers:
+            - datadog
+          processors:
+            - batch
+          exporters:
+            - coralogix
+        traces/dd:
+          receivers:
+            - datadog
+          processors:
+            - batch
+          exporters:
+            - coralogix
+  ports:
+    datadog:
+      enabled: true
+      containerPort: 8127
+      servicePort: 8127
+      hostPort: 8127
+      protocol: TCP
