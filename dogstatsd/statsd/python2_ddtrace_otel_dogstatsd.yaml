@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-otel-statsd
+  labels:
+    app: python-otel-statsd
+    # tags.datadoghq.com/env: production # Replace <env> with your environment (e.g., "production")
+    # tags.datadoghq.com/service: python-app # Replace <service> with your service name
+    # tags.datadoghq.com/version: "1.0.0" # Replace <version> with your application version
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-otel-statsd
+  template:
+    metadata:
+      labels:
+        app: python-otel-statsd
+        # tags.datadoghq.com/env: production # Replace <env> with your environment
+        # tags.datadoghq.com/service: python-app-2 # Replace <service> with your service name
+        # tags.datadoghq.com/version: "1.0.0" # Replace <version> with your application version
+      #   # admission.datadoghq.com/enabled: "true"
+      # annotations:
+      #   admission.datadoghq.com/python-lib.version: v2.17.3
+    spec:
+      containers:
+        - name: python-otel-statsd
+          image: 104013952213.dkr.ecr.eu-north-1.amazonaws.com/aharon-flask-app:python-statsd-20
+          workingDir: /app
+          command: ["opentelemetry-instrument","python", "dogstatsd.py"]
+          ports:
+            - name: http
+              containerPort: 5600
+          env:
+            - name: NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE):4317"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: cx.application.name=python-otel-statsd,cx.subsystem.name=python-otel-statsd
+            # - name: MY_POD_IP
+            #   valueFrom:
+            #     fieldRef:
+            #       fieldPath: status.podIP
+            # # - name: STATSD_HOST
+            # #   value: "http://$(MY_POD_IP):8128"
+            # - name: STATSD_HOST
+            #   value: "statsd-agent"
+            # - name: STATSD_PORT
+            #   value: "8128"

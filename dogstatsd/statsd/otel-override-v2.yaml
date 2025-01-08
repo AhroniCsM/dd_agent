@@ -1,0 +1,250 @@
+global:
+  logLevel: warn
+  domain: eu2.coralogix.com
+  clusterName: dd-trace-aharon
+opentelemetry-agent:
+  presets:
+    loadBalancing:
+      enabled: true
+      routingKey: 'traceID'
+      hostname: coralogix-opentelemetry-gateway
+    # The use of SpanMetrics in APM will require the backend to be reconfigured using the GRPC API.
+    # This is currently only available for design-partners during the Beta
+    spanMetrics:
+      enabled: true
+      dbMetrics:
+        enabled: true
+  config:
+    exporters:
+      debug:
+        verbosity: detailed
+    receivers:
+      statsd:
+        aggregation_interval: 10s
+        enable_metric_type: true
+        enable_simple_tags: true
+        endpoint: 0.0.0.0:8128
+        is_monotonic_counter: true
+        timer_histogram_mapping:
+          - observer_type: summary
+            statsd_type: timer
+          - histogram:
+              max_size: 50
+            observer_type: histogram
+            statsd_type: distribution
+          - histogram:
+              max_size: 50
+            observer_type: histogram
+            statsd_type: histogram
+          - observer_type: histogram
+            statsd_type: timing
+      filelog:
+        include:
+          - /var/log/pods/*/*/*.log
+          # TODO: Modify for required Namespaces
+          #- /var/log/pods/NAMESPACE1_*/*/*.log
+          #- /var/log/pods/NAMESPACE2_*/*/*.log
+
+    processors:
+      filter/db_spanmetrics:
+        traces:
+          span:
+            - attributes["db.system"] == nil
+      transform/db:
+        error_mode: silent
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["db.namespace"], attributes["db.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["server.address"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["network.peer.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["net.peer.name"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.namespace"], attributes["db.system"]) where attributes["db.namespace"] == nil
+              - set(attributes["db.operation.name"], attributes["db.operation"]) where attributes["db.operation.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.sql.table"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.cassandra.table"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.mongodb.collection"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.redis.database_index"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.elasticsearch.path_parts.index"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["db.cosmosdb.container"]) where attributes["db.collection.name"] == nil
+              - set(attributes["db.collection.name"], attributes["aws_dynamodb.table_names"]) where attributes["db.collection.name"] == nil
+
+
+      transform:
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["host.name"], resource.attributes["host.name"])
+              - set(attributes["process.command"], resource.attributes["process.command"])
+              - set(attributes["process.command_line"], resource.attributes["process.command_line"])
+              - set(attributes["process.executable.name"], resource.attributes["process.executable.name"])
+              - set(attributes["process.executable.path"], resource.attributes["process.executable.path"])
+              - set(attributes["process.owner"], resource.attributes["process.owner"])
+              - set(attributes["process.parent_pid"], resource.attributes["process.parent_pid"])
+              - set(attributes["process.pid"], resource.attributes["process.pid"])
+
+    service:
+      pipelines:
+        traces/db:
+          exporters:
+            - spanmetrics/db
+          processors:
+            - filter/db_spanmetrics
+            - transform/db
+            - batch
+          receivers:
+            - forward/db
+        metrics:
+          exporters:
+          - debug
+          - coralogix
+          processors:
+          - transform/prometheus
+          - k8sattributes
+          - resourcedetection/env
+          - resourcedetection/region
+          - memory_limiter
+          - batch
+          receivers:
+            - statsd
+        traces:
+          receivers:
+            - otlp
+            - zipkin
+            - jaeger
+          exporters:
+            - loadbalancing
+
+  ports:
+    statsd:
+      enabled: true
+      containerPort: 8128
+      servicePort: 8128
+      hostPort: 8128
+      protocol: UDP
+
+opentelemetry-gateway:
+  enabled: true
+  # Use these to scale-up or scale-out the gateway collectors.
+  replicaCount: 1
+  # resources:
+  #   requests:
+  #     cpu: 500m
+  #     memory: 256Mi
+  #   limits:
+  #     cpu: 2
+  #     memory: 2G
+
+  config:
+    connectors:
+      forward:
+      forward/coralogix:
+      spanmetrics:
+        histogram:
+          explicit:
+            buckets: [100us, 1ms, 2ms, 4ms, 6ms, 10ms, 100ms, 250ms]
+        dimensions:
+          - name: cgx.transaction
+            default: cx_null
+          - name: cgx.transaction.root
+            default: cx_null
+          - name: error
+            default: cx_null
+          - name: http.method
+            default: cx_null
+          - name: http.status_code
+            default: cx_null
+          - name: service.version
+            default: cx_null
+          - name: operation.category
+            default: cx_null
+        exemplars:
+          enabled: false
+        dimensions_cache_size: 1000
+        aggregation_temporality: 'AGGREGATION_TEMPORALITY_CUMULATIVE'
+        metrics_flush_interval: 15s
+        events:
+          enabled: true
+          dimensions:
+            - name: exception.type
+            - name: exception.message
+    processors:
+      tail_sampling:
+        policies: [
+                {
+              # ERRRORS - Sampled
+              name: errored-traces-policy,
+              type: and,
+              and:
+                {
+                  and_sub_policy:
+                    [
+                      {
+                        name: status-code-policy,
+                        type: status_code,
+                        status_code: { status_codes: [ERROR] },
+                      },
+                      {
+                        name: probabilistic-low-sample-policy,
+                        type: probabilistic,
+                        probabilistic: { sampling_percentage: 100 }, # Adjust, but keep super low!
+                      },
+                      # {
+                      #   name: rate-limiting-policy,
+                      #   type: rate_limiting,
+                      #   rate_limiting: { spans_per_second: 400 },
+
+                      # },
+                    ],
+                },
+            },
+            {
+              ### THIS SHOULD BE YOUR LAST POLICY - AS A CATCHALL
+              name: all-other-traces-policy,
+              type: and,
+              and:
+                {
+                  and_sub_policy:
+                    [
+                      {
+                        name: probabilistic-low-sample-policy,
+                        type: probabilistic,
+                        probabilistic: { sampling_percentage: 100 }, # Adjust, but keep super low!
+                      },
+                      # {
+                      #   name: rate-limiting-policy,
+                      #   type: rate_limiting,
+                      #   rate_limiting: { spans_per_second: 400 }, # reduce to 100
+                      # },
+                    ],
+                },
+            },
+          ]
+    service:
+      pipelines:
+        traces:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - spanmetrics
+            - forward/coralogix
+        traces/coralogix:
+          receivers:
+            - forward/coralogix
+          processors:
+            - memory_limiter
+            - tail_sampling
+            - batch
+          exporters:
+            - coralogix
+        metrics/coralogix:
+          receivers:
+            - spanmetrics
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - coralogix
